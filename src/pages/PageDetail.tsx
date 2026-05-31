@@ -18,14 +18,14 @@ import {
   ArrowRight, Brain, Info, Save, X, 
   ChevronUp, ChevronDown, ExternalLink,
   CheckCircle, BarChart2, Globe, Tag, Sparkles,
-  Calendar
+  Calendar, Pin
 } from 'lucide-react';
 import { useInlinkAnalytics } from '../hooks/useInlinkAnalytics';
 import InlinkBadge from '../components/InlinkBadge';
 import InlinkModal from '../components/InlinkModal';
 import * as inlinkGraphService from '../services/analysis/inlinkGraphService';
 import { useTemporalContext } from '../contexts/TemporalContext';
-import { applyTemporalBoost, sortByBoostedScore } from '../services/temporal/temporalService';
+import { applyTemporalBoost, sortByBoostedScore, buildLiveOrderedList, PIN_QUOTA } from '../services/temporal/temporalService';
 import TemporalBadge from '../components/TemporalBadge';
 
 export default function PageDetail() {
@@ -80,40 +80,10 @@ export default function PageDetail() {
   // محاسبه boostedList با useMemo (حیاتی برای پرفورمنس)
   const processedCandidates = useMemo(() => {
     if (!isTemporalActiveHere) return candidateList;
-    const boosted = applyTemporalBoost(candidateList, {
+    return buildLiveOrderedList(candidateList, {
       events: temporal.getAllActiveEvents(),
       targetMetadata: new Map() // در فاز اول از خود candidate.title و matched_tags استفاده می‌شود
     });
-    
-    // مرتب‌سازی اولیه کاندیداها بر اساس امتیاز بوست‌شده
-    const sortedBoosted = sortByBoostedScore(boosted);
-
-    // ۱. فیلتر زامبی‌ها (کاندیداهایی که جریمه شده‌اند: temporalMultiplier < 1)
-    const activeCandidates = sortedBoosted.filter(c => (c.temporalMultiplier ?? 1) >= 1);
-
-    // ۲. اعمال سهمیه لایو (Quota: Live Boost): حداکثر ۵ کاندیدای برتر بوست‌شده (temporalMultiplier > 1) بر اساس تمپورال مولتیپلایر نزولی، سپس امتیاز بوست شده نزولی
-    const liveBoosts = activeCandidates
-      .filter(c => (c.temporalMultiplier ?? 1) > 1)
-      .sort((a, b) => {
-        const multA = a.temporalMultiplier ?? 1;
-        const multB = b.temporalMultiplier ?? 1;
-        if (multB !== multA) {
-          return multB - multA;
-        }
-        return b.boostedScore - a.boostedScore;
-      })
-      .slice(0, 5);
-    
-    // ۳. اعمال سهمیه اورگرین (Quota: Evergreen): حداکثر ۳ کاندیدای برتر عادی (temporalMultiplier === 1 یا بدون ضریب) بر اساس score (امتیاز پایه) نزولی
-    const evergreens = activeCandidates
-      .filter(c => (c.temporalMultiplier ?? 1) === 1)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
-
-    // ۴. ترکیب نهایی بدون اعمال سورت ثانویه روی کل لیست برای حفظ مرز اولویت‌ها
-    const finalCandidates = [...liveBoosts, ...evergreens];
-
-    return finalCandidates;
   }, [candidateList, isTemporalActiveHere, temporal]);
 
   // نمایش ۳۰ کاندیدای برتر در حالت پیش‌فرض و نمایش بقیه با دکمه مشاهده بیشتر
@@ -380,8 +350,18 @@ export default function PageDetail() {
                     whileInView={{ opacity: 1, y: 0 }}
                     viewport={{ once: true }}
                     transition={{ delay: index * 0.02 }}
-                    className="relative"
+                    className={`relative rounded-2xl transition-all ${
+                      isTemporalActiveHere && index < PIN_QUOTA 
+                        ? 'ring-2 ring-emerald-500/40 shadow-xs' 
+                        : ''
+                    }`}
                   >
+                    {isTemporalActiveHere && index < PIN_QUOTA && (
+                      <div className="absolute top-2 right-2 bg-emerald-500 text-white rounded-lg px-2 py-0.5 text-[9px] font-bold z-10 shadow-xs flex items-center gap-1 opacity-90">
+                        <Pin size={10} className="rotate-45" />
+                        <span>پین لایو</span>
+                      </div>
+                    )}
                     {/* ارسال اختیاری مقدار index برای رتبه‌دهی ترتیبی مطمئن */}
                     <CandidateCard 
                       candidate={c} 

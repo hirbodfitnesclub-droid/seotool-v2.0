@@ -21,17 +21,17 @@ export default function TemporalBadge({ multiplier, label, reason }: TemporalBad
     case 'pre':
       badgeClasses = 'bg-emerald-50 text-emerald-700 border border-emerald-200';
       Icon = TrendingUp;
-      text = `+${multiplier}x`;
+      text = `x${multiplier}`;
       break;
     case 'current':
       badgeClasses = 'bg-blue-50 text-blue-700 border border-blue-200';
       Icon = Calendar;
-      text = `+${multiplier}x`;
+      text = `x${multiplier}`;
       break;
     case 'out-of-season':
-      badgeClasses = 'bg-rose-50 text-rose-700 border border-rose-200';
+      badgeClasses = 'bg-rose-50 text-rose-700 border border-rose-100';
       Icon = TrendingDown;
-      text = '−penalty';
+      text = `x${multiplier}`;
       break;
     default:
       return null;

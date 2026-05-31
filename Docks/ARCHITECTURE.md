@@ -478,9 +478,11 @@ export function useInlinkAnalytics(projectId: number, targetPageId: number): {
   ```ts
   type BoostedCandidate = OriginalCandidate & {
     boostedScore: number;       // score * multiplier
-    temporalMultiplier: number; // 4 | 3 | 1 | 0.15
+    temporalMultiplier: number; // 4 | 3 | 1 | 0.15 | 0.001
     temporalReason: string;     // مثال: «پیش‌واز یلدا — ۴۵ روز مانده»
     temporalLabel: 'pre' | 'current' | 'neutral' | 'out-of-season';
+    matchedEventName: string | null;
+    temporalTargetMonth?: number; // ماه هدف رویداد — برای اعمال پنجره مجاز (قانون ۲)
   };
   ```
 - **نقطه اعمال:** فقط در لایه UI/Service هنگام آماده‌سازی لیست برای نمایش یا ارسال به Gemini. هرگز قبل از `bulkAdd` به Dexie.
@@ -517,34 +519,62 @@ export function useInlinkAnalytics(projectId: number, targetPageId: number): {
 └───────────────────────────────────────────────────────────────┘
 ```
 
+### شش قانون قطعی «عینک لایو» (مرجع مطلق)
+
+> این شش قانون منبع حقیقت هستند. هر کد، هر دیباگ و هر تغییر آینده باید با این‌ها سازگار باشد. در صورت تعارض هر بخش دیگری از این سند با این قوانین، این قوانین برنده‌اند. شرح باگ‌های فعلی و نقشه اصلاح در `tasks.md → تسک F2.7`.
+
+| # | قانون | جزئیات |
+|---|---|---|
+| ۱ | **لایه ثانویه + پایپ‌لاین تک‌مرجع** | عینک یک Middleware Pure است. `score` خام/Dexie/`scorer.ts` هرگز تغییر نمی‌کنند. **کل** منطق عینک در `temporalService.ts` است، نه در UI. هر دو مسیر (نمایش و Gemini) همان تابع orchestrator را صدا می‌زنند. |
+| ۲ | **پنجره زمانی مجاز (قطعی، بدون شرط)** | ماه‌های مجاز = ماه جاری + ماه بعد + ماه‌های فصل جاری. اگر ماه جاری **آخرین ماه فصل** باشد (خرداد/شهریور/آذر/اسفند)، فصل بعد هم به‌صورت **ژنریک فصلی** مجاز است (مثلاً «تور تابستان»)، نه تک‌تک ماه‌هایش. استثنای حق‌تقدم: رویداد **current** که از قبل شروع شده (نوروز از اسفند) هرگز خنثی نمی‌شود. |
+| ۳ | **ضرایب** | pre `×4` · current `×3` · neutral `×1` · out-of-season `×0.15` · expired/زامبی `×0.001`. |
+| ۴ | **سهمیه پین = همیشه ۴** | حداکثر ۴ کاندیدای برتر بوست‌شده پین می‌شوند. **بدون تفکیک عادی/زمان‌دار.** بقیه لیست کامل زیر پین‌ها نمایش داده می‌شود؛ **لیست هرگز بریده نمی‌شود.** |
+| ۵ | **مرتب‌سازی اکید قطعی** | اول `temporalMultiplier` نزولی، سپس `boostedScore` نزولی. یکسان در UI و Gemini. |
+| ۶ | **زامبی‌کشی** | رویداد منقضی/خیلی‌دور → `×0.001` و ته لیست (حذف نمی‌شود). جدا از penalty `×0.15`. |
+
 ### قواعد محاسبه (Decision Tree برای هر کاندیدا)
 
 ورودی برای هر کاندیدا: `targetTitle`, `targetCategories` (از `pages.categories` — یا تگ‌های موجود در candidate). در زمان فعلی شمسی `today = { year, month, day }` ثابت است (یک‌بار محاسبه می‌شود).
 
 ```
-برای هر event فعال (CSV + built-in):
-  match = آیا یکی از event.keywords در targetTitle یا targetCategories هست؟
-  if !match: continue
-  
-  اگر today در بازه [event.startDate, event.endDate]:
-    ⇒ status = 'current', multiplier = 3
-  
-  وگرنه اگر event.startDate - today در [۳۰, ۶۰] روز:
-    ⇒ status = 'pre', multiplier = 4
-  
-  وگرنه:
-    ⇒ skip (این event بر این کاندیدا اثر ندارد)
+گام ۱ — طبقه‌بندی ضریب (برای هر کاندیدا، بهترین event برنده):
+  برای هر event فعال (CSV + built-in):
+    match = آیا یکی از event.keywords با keywords کاندیدا تطابق دارد؟ (normalize نیم‌فاصله)
+    if !match: continue
+    projected = projectEventToCurrentYear(event, today)   // نگاشت رویداد سالانه به امسال/سال بعد
 
-اگر هیچ event matched نشد ولی کاندیدا حداقل یک کلمه‌کلیدی فصلی/مناسبتی دارد
-که الان «خارج از فصل» است (مثلاً «بهار» در پاییز):
-  ⇒ status = 'out-of-season', multiplier = 0.15
+    اگر today در بازه [projected.startDate, projected.endDate]:
+      ⇒ status = 'current', multiplier = 3
+    وگرنه اگر daysToStart در (۰، ۶۰]:
+      ⇒ status = 'pre', multiplier = 4
+    وگرنه:
+      ⇒ این event «منقضی/خیلی‌دور» است (کاندیدای آن نامزد زامبی‌شدن)
 
-در غیر اینصورت:
-  ⇒ status = 'neutral', multiplier = 1
+  بهترین match = بالاترین multiplier. priority: pre(۴) > current(۳).
+  اگر هیچ event فعالی match نشد ولی کاندیدا فقط eventهای «منقضی» داشت:
+    ⇒ status = 'out-of-season' (زامبی)، multiplier = 0.001    // قانون ۶
+  اگر هیچ event نداشت ولی کلمه‌کلیدی فصلی دارد که الان خارج از فصل است:
+    ⇒ status = 'out-of-season'، multiplier = 0.15
+  در غیر اینصورت:
+    ⇒ status = 'neutral'، multiplier = 1
 
-بهترین event match = بالاترین multiplier (priority: pre > current > neutral > out-of-season)
-وقتی هم pre و هم current match شدند، pre برنده است (multiplier = 4).
+گام ۲ — اعمال پنجره مجاز (قانون ۲، بدون شرط):
+  محاسبه allowedMonths = { currentMonth, nextMonth, ...currentSeasonMonths }
+  اگر currentMonth آخرین ماه فصل بود: allowedMonths += «نشانگر فصل بعد (ژنریک)»
+  برای هر کاندیدای بوست‌شده (multiplier > 1):
+    اگر label === 'current': دست‌نخورده بماند (استثنای حق‌تقدم — نوروز از اسفند)
+    وگرنه اگر temporalTargetMonth ∉ allowedMonths:
+      ⇒ خنثی شود (multiplier = 1، label = 'neutral')   // بوست خارج پنجره لغو می‌شود
+  توجه: این مرحله «بدون شرط» اجرا می‌شود؛ نه مشروط به وجود حداقل یک بوست معتبر.
+
+گام ۳ — مرتب‌سازی اکید (قانون ۵):
+  sort: اول multiplier نزولی، سپس boostedScore نزولی.
+
+گام ۴ — پین (قانون ۴، صرفاً لایه نمایش/پرامپت):
+  ۴ کاندیدای اول لیستِ مرتب‌شده «پین» تلقی می‌شوند؛ بقیه کل لیست بدون برش پشت سر آن‌ها می‌آید.
 ```
+
+> **هشدار دام (Anti-bug):** گام ۴ هرگز نباید با `slice` لیست را کوتاه کند. «پین ۴» یعنی ۴ آیتم اول برجسته/تثبیت می‌شوند، نه این‌که لیست به ۴ (یا ۸) آیتم محدود شود. باگ تاریخی `liveBoosts.slice(0,5)+evergreens.slice(0,3)` دقیقاً همین قانون را نقض می‌کرد (جدول ۸‌تایی).
 
 ### فصل‌ها و ماه‌های Built-in
 
@@ -605,10 +635,11 @@ export interface BoostedCandidate {
   matched_tags: string[];
   // ضمائم F2:
   boostedScore: number;
-  temporalMultiplier: 4 | 3 | 1 | 0.15;
+  temporalMultiplier: 4 | 3 | 1 | 0.15 | 0.001;
   temporalLabel: TemporalLabel;
   temporalReason: string;
   matchedEventName: string | null;
+  temporalTargetMonth?: number; // ماه هدف رویداد — برای پنجره مجاز (قانون ۲)
 }
 
 export function applyTemporalBoost(
@@ -616,14 +647,27 @@ export function applyTemporalBoost(
   options: {
     events: TemporalEvent[];  // built-in + CSV ترکیب‌شده
     today?: JalaliDate;        // پیش‌فرض = getCurrentJalaliDate()
-    targetMetadata: Map<number, { title: string; categoryValues: string[] }>;
+    targetMetadata?: Map<number, { title: string; categoryValues: string[] }>;
     // طبق منطق: یا از خود candidate.title و candidate.matched_tags استفاده می‌شود
     // یا اگر داده غنی‌تر بود، از targetMetadata پاس‌داده‌شده استفاده می‌شود.
   }
-): BoostedCandidate[];
+): BoostedCandidate[];   // شامل گام ۱ (ضریب) + گام ۲ (پنجره مجاز). هنوز مرتب نشده.
 
 // نکته مهم: applyTemporalBoost یک تابع Pure است.
 // آرایه ورودی mutate نمی‌شود؛ آرایه جدید برمی‌گرداند.
+
+// ── Orchestrator تک‌مرجع (قانون ۱ و ۵) — هر دو مسیر UI و Gemini باید این را صدا بزنند ──
+// خروجی: لیست کاملِ مرتب‌شدهٔ اکید (multiplier نزولی، سپس boostedScore نزولی).
+// هیچ برشی (slice) اعمال نمی‌شود؛ پین صرفاً برجسته‌سازی ۴ ردیف اول در لایه نمایش است.
+export function buildLiveOrderedList(
+  candidates: any[],
+  options: { events: TemporalEvent[]; today?: JalaliDate;
+             targetMetadata?: Map<number, { title: string; categoryValues: string[] }> }
+): BoostedCandidate[];   // = sortByBoostedScore(applyTemporalBoost(...)) با سورت اکید قانون ۵
+
+// helper نمایشی برای پین (قانون ۴): فقط متادیتای «۴ ردیف اول پین است» را می‌دهد،
+// لیست را کوتاه نمی‌کند. مصرف‌کننده تمام لیست را رندر می‌کند.
+export const PIN_QUOTA = 4;
 
 // src/services/temporal/temporalCsvService.ts
 export function generateCsvTemplate(): string;  // string CSV با هدر فارسی + ۲ ردیف نمونه
@@ -663,16 +707,20 @@ interface TemporalContextValue extends TemporalState {
 
 invalidation: ندارد. تغییر هر مقدار → Provider بلافاصله state و localStorage را sync می‌کند → کامپوننت‌های مصرف‌کننده re-render می‌شوند → `applyTemporalBoost` در render بعدی با مقادیر جدید اجرا می‌شود.
 
-### نقاط اعمال در UI (نمایش)
+### نقاط اعمال (هر دو مسیر یک پایپ‌لاین مشترک — قانون ۱)
 
-1. **`PageDetail.tsx`** — `displayedCandidates` قبل از map شدن به `<CandidateCard>` از طریق `applyTemporalBoost` عبور می‌کند **اگر** `temporalCtx.isEnabledForPage(pgId)` true باشد. مرتب‌سازی نهایی بر اساس `boostedScore` نزولی می‌شود.
-2. **`PageDetail.tsx` Quick Toggle** — یک سوییچ کوچک کنار Badge‌ها که فقط `temporalCtx.setPageEnabled(pgId, !current)` صدا می‌زند. تغییر آنی چون state در Context است.
-3. **`Config.tsx`** — یک سکشن جدید با: سوییچ سراسری + دکمه دانلود تمپلیت + ورودی فایل CSV + جدول preview eventهای فعال.
-4. **`CandidateCard.tsx` (ویرایش حداقلی)** — اگر `boostedScore !== score` و `temporalMultiplier !== 1` بود، یک Badge کوچک (`<TemporalBadge>`) کنار rank نمایش داده می‌شود (`+4x یلدا` یا `−penalty خارج از فصل`).
+> **اصل مطلق:** هیچ بخشی از منطق عینک نباید داخل کامپوننت UI بازنویسی شود. هم نمایش و هم ارسال به Gemini باید **همان** `buildLiveOrderedList(...)` را صدا بزنند تا ترتیبی که کاربر می‌بیند **عیناً** همان ترتیبی باشد که به AI می‌رود (قانون ۵).
+
+1. **`PageDetail.tsx` (نمایش)** — اگر `temporalCtx.isEnabledForPage(pgId)` true باشد، `processedCandidates = buildLiveOrderedList(candidateList, { events: getAllActiveEvents() })`. این **کل لیست مرتب‌شده** است؛ سپس `displayedCandidates` فقط برای صفحه‌بندی نمایشی (۳۰ تای اول + دکمه «مشاهده بیشتر») برش می‌خورد — نه برای منطق عینک. **هرگز** با `slice(0,5)+slice(0,3)` کوتاه نمی‌شود (قانون ۴). ۴ ردیف اول طبق `PIN_QUOTA` به‌عنوان «پین» برجسته می‌شوند.
+2. **`PageDetail.tsx` Quick Toggle** — سوییچ کوچک کنار Badge‌ها که فقط `temporalCtx.setPageEnabled(pgId, !current)` صدا می‌زند. تغییر آنی چون state در Context است.
+3. **`Config.tsx`** — سکشن سوییچ سراسری + دانلود تمپلیت + آپلود CSV + جدول preview eventهای فعال.
+4. **`CandidateCard.tsx` / wrapper** — اگر `temporalMultiplier !== 1` بود، `<TemporalBadge>` نمایش داده می‌شود (`+4x یلدا` یا `−penalty خارج از فصل` یا «زامبی»).
 
 ### نقاط اعمال در ارسال به Gemini
 
-`runSinglePageAnalysis` در `analysisService.ts` لیست top30 را قبل از ارسال به `buildSinglePagePrompt` از `applyTemporalBoost` عبور می‌دهد و **بر اساس boostedScore دوباره مرتب می‌کند** (اگر فیچر برای آن صفحه فعال است). به این ترتیب AI صفحاتی را اول می‌بیند که از نظر زمانی هم relevant هستند. **هیچ تغییری در فرمت prompt یا schema** Gemini.
+`runSinglePageAnalysis` در `analysisService.ts` باید **همان** `buildLiveOrderedList(...)` را روی کاندیداها صدا بزند (اگر فیچر فعال است)، سپس top30 را از روی **لیست مرتب‌شدهٔ اکید** بردارد. به این ترتیب AI دقیقاً همان ترتیب نمایش را می‌بیند. **هیچ تغییری در فرمت prompt یا schema** Gemini.
+
+> **باگ تاریخی (نقض قانون ۱ و ۵):** نسخه فعلی `runSinglePageAnalysis` فقط `sortByBoostedScore` می‌زند و زامبی‌کشی/پنجره/پین را اعمال نمی‌کند، در حالی‌که `PageDetail` این مراحل را جداگانه داخل خودش دارد → ترتیب AI ≠ ترتیب نمایش. تسک F2.7 این واگرایی را با استخراج پایپ‌لاین مشترک رفع می‌کند.
 
 ### جریان داده
 
@@ -700,13 +748,22 @@ invalidation: ندارد. تغییر هر مقدار → Provider بلافاصل
 
 ### معیارهای پذیرش
 
+**زیرساخت (بدون تغییر):**
 1. خروجی Dexie بایت-به-بایت دست‌نخورده (diff = 0).
 2. `scorer.ts` و `idfCalculator.ts` diff = 0.
-3. در پروژه ۷۰۰ صفحه‌ای: روشن کردن سوییچ هیچ freeze نمی‌سازد (محاسبه روی top30 یا top200 instant است).
+3. در پروژه ۷۰۰ صفحه‌ای: روشن کردن سوییچ هیچ freeze نمی‌سازد.
 4. اگر فیچر خاموش باشد، رفتار قبلی (مرتب‌سازی بر اساس `score` خام) حفظ شود.
-5. تاریخ شمسی فقط با `Intl.DateTimeFormat('fa-IR')` بومی به‌دست می‌آید — هیچ کتابخانه moment-jalaali.
+5. تاریخ شمسی فقط با `Intl.DateTimeFormat('fa-IR')` بومی — هیچ کتابخانه moment-jalaali.
 6. آپلود CSV نامعتبر → خطای فارسی + لینک دانلود تمپلیت.
-7. تنظیمات بعد از reload صفحه از localStorage بازخوانی شود.
+7. تنظیمات بعد از reload از localStorage بازخوانی شود.
+
+**انطباق با شش قانون (تسک F2.7):**
+8. **قانون ۱:** کل منطق عینک در `temporalService.ts`؛ هیچ `slice`/فیلتر/سورتِ منطق‌دار داخل `PageDetail.tsx`. هر دو مسیر `buildLiveOrderedList` را صدا می‌زنند.
+9. **قانون ۲:** در خرداد (آخر بهار)، تور فروردین نمایش داده نشود؛ تور تیر/تابستان (فصل بعد، ژنریک) مجاز باشد؛ تور آبان نمایش داده نشود. نوروزِ در حال برگزاری در فروردین با وجود `startMonth=12` خنثی **نشود**.
+10. **قانون ۳:** «تور یلدا» در ۱۵ آبان → `pre`, `×4`. رویداد در حال برگزاری → `current`, `×3`. (ترتیب pre > current.)
+11. **قانون ۴:** خروجی نمایش، **کل** لیست کاندیداها را شامل شود (نه ۸ تا، نه ۴ تا)؛ فقط ۴ ردیف اول «پین» برجسته شوند.
+12. **قانون ۵:** ترتیب `displayedCandidates` در UI با ترتیب لیستی که به `buildSinglePagePrompt` می‌رود **یکسان** باشد.
+13. **قانون ۶:** کاندیدای متعلق به رویداد منقضی → `×0.001`، در ته لیست، اما **حذف نشود**.
 
 ---
 

@@ -14,7 +14,7 @@ import { computeAndStoreCandidates } from '../../utils/candidateStorage';
 import { buildSinglePagePrompt } from '../api/promptBuilder';
 import { callGemini } from '../api/geminiClient';
 import { safeJsonParse } from '../../utils/safeJson';
-import { applyTemporalBoost, sortByBoostedScore, TemporalEvent } from '../temporal/temporalService';
+import { buildLiveOrderedList, TemporalEvent } from '../temporal/temporalService';
 
 /**
  * شروع فرآیند تحلیل کل صفحات یک پروژه
@@ -98,10 +98,9 @@ export async function runSinglePageAnalysis(
   
   let processedCandidates = candidateList;
   if (temporalEvents && temporalEvents.length > 0) {
-    const boosted = applyTemporalBoost(candidateList, {
+    processedCandidates = buildLiveOrderedList(candidateList, {
       events: temporalEvents
     });
-    processedCandidates = sortByBoostedScore(boosted);
   }
 
   const top30 = processedCandidates.slice(0, 30);
@@ -126,9 +125,14 @@ export async function runSinglePageAnalysis(
     })
   );
 
+  // اعمال لوله فیلترینگ و مرتب‌سازی زنده به داده‌های ورودی جمینای در صورت فعال بودن لایو
+  const finalAiCandidates = temporalEvents && temporalEvents.length > 0
+    ? buildLiveOrderedList(enrichedCandidates, { events: temporalEvents })
+    : enrichedCandidates;
+
   const prompt = buildSinglePagePrompt(
     { title: page.title, categories: page.categories },
-    enrichedCandidates
+    finalAiCandidates
   );
 
   const response = await callGemini(prompt, model);

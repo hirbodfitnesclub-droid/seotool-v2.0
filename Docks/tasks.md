@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فن������
+### راهنمای پیاده‌سازی فن��������
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -1161,3 +1161,78 @@ F1.1 (Reverse Index Service)
 `CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/PageDetail.tsx", "src/contexts/TemporalContext.tsx", "src/services/temporal/temporalService.ts", "src/services/analysis/analysisService.ts", "src/components/CandidateCard.tsx"]`
 
 > **یادآوری:** فایل‌های کانتکست را بخوان و کد را بنویس.
+
+---
+
+## تسک F2.7 — دیباگ و یکپارچه‌سازی عینک لایو (Re-architecture) 🐞 [فعال]
+
+> **مرجع مطلق:** «شش قانون قطعی عینک لایو» در `PROJECT.md` و `ARCHITECTURE.md §۱۰`. هر تصمیمی در این تسک باید با آن شش قانون سازگار باشد. در صورت تعارض با تسک‌های قدیمی F2.2/F2.6، **این تسک و شش قانون برنده‌اند.**
+
+### چرا این تسک وجود دارد
+تسک‌های F2.1–F2.6 پیاده شدند، اما در جریان چند دیباگ متوالی منطق عینک به‌جای ماندن در یک سرویس Pure، **تکه‌تکه داخل `PageDetail.tsx` جاسازی** شد و در دو مسیر (نمایش / Gemini) **واگرا** شد. علامت‌های گزارش‌شده توسط کاربر: «جدول فقط ۸ تور نشان می‌دهد»، «ماه‌های اشتباه نمایش داده می‌شوند»، و «هر بار پیچیده‌تر و خراب‌تر شد».
+
+### تشخیص معمار — جدول باگ‌های تأییدشده
+
+| کد | باگ | محل | قانون نقض‌شده |
+|---|---|---|---|
+| **A** | لیست به حداکثر ۸ آیتم محدود می‌شود؛ `liveBoosts.slice(0,5)` + `evergreens.slice(0,3)` بقیه کاندیداها را دور می‌ریزد | `PageDetail.tsx` (`processedCandidates` useMemo) | قانون ۴ |
+| **B** | سهمیه ۵+۳ و تفکیک «عادی/زمان‌دار» — باید حذف و با **پین ثابت ۴** جایگزین شود (لیست کامل حفظ شود) | `PageDetail.tsx` | قانون ۴ |
+| **C** | ضرایب معکوس: `classifyEventTiming` می‌دهد current=`×4` و pre=`×3`؛ صحیح: pre=`×4`، current=`×3` | `temporalService.ts` (`classifyEventTiming`) | قانون ۳ |
+| **D** | پنجره مجاز **مشروط** اعمال می‌شود (`hasValidBoostedInWindow`) → رفتار غیرقطعی | `temporalService.ts` (`applyDynamicAllowedWindow`) | قانون ۲ |
+| **E** | رویداد **current** که از ماه قبل شروع شده (نوروز از اسفند، `temporalTargetMonth=12`) توسط پنجره خنثی می‌شود → «نمایش ماه‌های اشتباه» | `temporalService.ts` | قانون ۲ و ۵ |
+| **F** | وقتی ماه جاری **آخرین ماه فصل** است (خرداد/شهریور/آذر/اسفند)، فصل بعد به‌صورت «ژنریک فصلی» باید مجاز شود ولی نمی‌شود | `temporalService.ts` | قانون ۲ |
+| **G** | منطق عینک در UI جاسازی شده؛ `runSinglePageAnalysis` فقط `sortByBoostedScore` می‌زند (بدون زامبی‌کشی/پنجره/پین/سورت اکید) → ترتیب AI ≠ ترتیب نمایش | `PageDetail.tsx` در برابر `analysisService.ts` | قانون ۱ و ۵ |
+| **H** | پنجره ۰–۶۰ روزه pre دارای dead-zone نیست ولی نسخه قدیمی اسناد ۳۰–۶۰ بود؛ canonical = `0 < daysToStart ≤ 60` | `temporalService.ts` (`classifyEventTiming`) | قانون ۳ |
+
+### هدف
+انتقال **کل** منطق عینک به یک پایپ‌لاین Pure تک‌مرجع در `temporalService.ts`، و صدا زدن آن از هر دو مسیر (UI و AI) به‌طور یکسان. صفر تغییر در `scorer.ts`/`idfCalculator.ts`/`db.ts`/Dexie.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **`src/services/temporal/temporalService.ts` — اصلاح و تثبیت پایپ‌لاین:**
+   - **(رفع C, H)** در `classifyEventTiming`: current → `multiplier 3`، pre → `multiplier 4`. شرط pre: `daysToStart > 0 && daysToStart <= 60`.
+   - **(رفع D)** در `applyDynamicAllowedWindow`: شرط `hasValidBoostedInWindow` را حذف کن. پنجره **همیشه** اعمال شود.
+   - **(رفع E)** استثنای حق‌تقدم: کاندیدایی با `temporalLabel === 'current'` هرگز توسط پنجره خنثی نشود (صرف‌نظر از `temporalTargetMonth`).
+   - **(رفع F)** محاسبه `allowedMonths`: `{ currentMonth, nextMonth, ...currentSeasonMonths }`. اگر `currentMonth ∈ {3,6,9,12}` (آخر فصل)، یک نشانگر «فصل بعد ژنریک» اضافه کن: تورهایی که keyword نام فصل بعد را دارند (مثلاً «تابستان») مجاز شوند، حتی اگر `temporalTargetMonth` آن‌ها در فصل بعد و خارج از ماه‌های صریح است. (تک‌تک ماه‌های فصل بعد مجاز **نمی‌شوند** — فقط تطبیق نام فصل.)
+   - **(رفع G, قانون ۱+۵)** تابع جدید `export function buildLiveOrderedList(candidates, options): BoostedCandidate[]` که = `sortByBoostedScore(applyTemporalBoost(candidates, options))` با **سورت اکید**: اول `temporalMultiplier` نزولی، سپس `boostedScore` نزولی. (`sortByBoostedScore` فعلی فقط بر `boostedScore` است — یا آن را به سورت اکید ارتقا بده یا تابع سورت جدید بساز.)
+   - `export const PIN_QUOTA = 4;`
+   - **هیچ** برشی (`slice`) داخل service نباشد؛ `buildLiveOrderedList` همیشه **کل** لیست را برمی‌گرداند.
+
+۲. **`src/pages/PageDetail.tsx` — تخلیه منطق از UI (رفع A, B, G):**
+   - `processedCandidates` useMemo را به این ساده‌سازی برسان:
+     ```
+     if (!isTemporalActiveHere) return candidateList;
+     return buildLiveOrderedList(candidateList, { events: temporal.getAllActiveEvents() });
+     ```
+   - **حذف کامل** بلوک‌های `liveBoosts.slice(0,5)`، `evergreens.slice(0,3)`، فیلتر زامبی دستی و سورت‌های محلی.
+   - `displayedCandidates`: همان منطق صفحه‌بندی نمایشی فعلی (۳۰ تای اول + «مشاهده بیشتر») روی **لیست کامل**. این برش صرفاً نمایشی است و ربطی به منطق عینک ندارد.
+   - پین: ۴ ردیف اول `processedCandidates` (طبق `PIN_QUOTA`) به‌صورت بصری «پین» برجسته شوند (مثلاً border/نشان). بقیه عادی.
+
+۳. **`src/services/analysis/analysisService.ts` — هم‌ترازی مسیر AI (رفع G):**
+   - در `runSinglePageAnalysis`، وقتی `temporalEvents` پاس داده شده:
+     ```
+     processedCandidates = buildLiveOrderedList(candidateList, { events: temporalEvents });
+     ```
+     به‌جای `sortByBoostedScore(applyTemporalBoost(...))` فعلی. سپس `top30 = processedCandidates.slice(0,30)` (این برش برای محدودیت پرامپت است، نه منطق عینک — مجاز).
+
+۴. **`src/components/TemporalBadge.tsx`** — افزودن نمایش حالت زامبی (`×0.001`) و اطمینان از این‌که برچسب‌ها با ضرایب صحیح (pre=`+4x`، current=`+3x`) هم‌خوان‌اند.
+
+### محدودیت‌ها
+- ⛔ صفر تغییر در `scorer.ts`، `idfCalculator.ts`، `db.ts`، اسکیمای Dexie.
+- ⛔ هیچ منطق عینک (فیلتر/سورت/پنجره/پین/زامبی) داخل کامپوننت UI نماند.
+- ⛔ هیچ `slice` برای منطق عینک؛ slice فقط برای صفحه‌بندی نمایشی یا محدودیت top30 پرامپت.
+- ✅ توابع service همچنان Pure و بدون side-effect.
+- ✅ کامنت‌ها فارسی.
+
+### معیار پذیرش (نگاشت مستقیم به شش قانون)
+- **قانون ۱:** هیچ منطق عینکی در `PageDetail.tsx` باقی نمانده؛ هر دو مسیر `buildLiveOrderedList` را صدا می‌زنند.
+- **قانون ۲:** در خرداد، تور فروردین نمایش داده نمی‌شود؛ تور تابستان (فصل بعد ژنریک) مجاز است؛ نوروزِ در حال برگزاری در فروردین خنثی نمی‌شود.
+- **قانون ۳:** «تور یلدا» در ۱۵ آبان → `pre`/`×4`؛ رویداد در حال برگزاری → `current`/`×3`.
+- **قانون ۴:** جدول کل کاندیداها را نشان می‌دهد (نه ۸ تا)؛ فقط ۴ ردیف اول پین برجسته‌اند.
+- **قانون ۵:** ترتیب `displayedCandidates` با ترتیب ورودی `buildSinglePagePrompt` بایت-به-بایت یکسان است.
+- **قانون ۶:** کاندیدای رویداد منقضی → `×0.001`، ته لیست، حذف‌نشده.
+- `tsc --noEmit` بدون خطا. خروجی Dexie diff = 0.
+
+`CONTEXT_FILES: ["Docks/PROJECT.md", "Docks/ARCHITECTURE.md", "src/services/temporal/temporalService.ts", "src/services/temporal/jalaliCalendar.ts", "src/constants/temporalSeasons.ts", "src/pages/PageDetail.tsx", "src/services/analysis/analysisService.ts", "src/components/TemporalBadge.tsx", "src/contexts/TemporalContext.tsx"]`
+
+> **یادآوری:** حق نداری هیچ کدی را حدس بزنی؛ همین الان فایل‌های کانتکست را زنده بخوان، سپس فقط طبق شش قانون و این جدول باگ کد بزن. الگوریتم پایه (`scorer.ts`) را لمس نکن.

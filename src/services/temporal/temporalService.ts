@@ -157,20 +157,20 @@ function projectEventToCurrentYear(event: TemporalEvent, today: JalaliDate): Tem
 function classifyEventTiming(
   event: TemporalEvent,
   today: JalaliDate
-): { label: TemporalLabel; multiplier: 4 | 3 | 1 | 0.15; reason: string } | null {
+): { label: TemporalLabel; multiplier: 4 | 3 | 1 | 0.15 | 0.001; reason: string } | null {
   if (isJalaliInRange(today, event.startDate, event.endDate)) {
     return {
       label: 'current',
-      multiplier: 4,
+      multiplier: 3,
       reason: `در حال برگزاری: ${event.name}`,
     };
   }
 
   const daysToStart = jalaliDaysBetween(today, event.startDate);
-  if (daysToStart >= 0 && daysToStart <= 60) {
+  if (daysToStart > 0 && daysToStart <= 60) {
     return {
       label: 'pre',
-      multiplier: 3,
+      multiplier: 4,
       reason: `پیش‌واز ${event.name} — ${daysToStart} روز مانده`,
     };
   }
@@ -374,25 +374,41 @@ export function applyDynamicAllowedWindow(
   const allowedSet = new Set<number>([currentMonth, nextMonth, ...seasonMonths]);
   const allowedMonths = Array.from(allowedSet);
 
-  // بررسی فعال بودن یکی از رویدادهای مجاز در تورها (قانون حق تقدم مطلق)
-  const hasValidBoostedInWindow = candidates.some(
-    (c) =>
-      c.temporalMultiplier > 1 &&
-      c.temporalTargetMonth !== undefined &&
-      allowedMonths.includes(c.temporalTargetMonth)
-  );
-
-  if (!hasValidBoostedInWindow) {
-    return candidates;
+  // تشخیص فصل بعد ژنریک اگر ماه جاری آخرین ماه فصل باشد
+  let nextSeasonName = '';
+  if (currentMonth === 3) {
+    nextSeasonName = 'تابستان';
+  } else if (currentMonth === 6) {
+    nextSeasonName = 'پاییز';
+  } else if (currentMonth === 9) {
+    nextSeasonName = 'زمستان';
+  } else if (currentMonth === 12) {
+    nextSeasonName = 'بهار';
   }
 
   return candidates.map((c) => {
-    // اگر کاندیدا بونوس گرفته اما متعلق به ماه غیرمجاز است، امتیاز آن خنثی می‌شود
+    // استثنای حق‌تقدم: رویداد با وضعیت current هرگز تحت تاثیر پنجره خنثی نمی‌شود
+    if (c.temporalLabel === 'current') {
+      return c;
+    }
+
+    // اگر کاندیدا برانگیخته (بوست) شده ولی متعلق به ماه غیرمجاز است، امتیاز آن خنثی می‌شود
     if (
       c.temporalMultiplier > 1 &&
       c.temporalTargetMonth !== undefined &&
       !allowedMonths.includes(c.temporalTargetMonth)
     ) {
+      // بررسی استثنای فصل بعد ژنریک
+      if (nextSeasonName) {
+        const candidateKeywords = extractKeywordsFromCandidate(c);
+        const matchesNextSeasonGeneric = candidateKeywords.some((kw) =>
+          normalizeString(kw).includes(normalizeString(nextSeasonName))
+        );
+        if (matchesNextSeasonGeneric) {
+          return c; // معاف از خنثی‌سازی
+        }
+      }
+
       return {
         ...c,
         boostedScore: c.score,
@@ -406,9 +422,33 @@ export function applyDynamicAllowedWindow(
 }
 
 /**
- * مرتب‌سازی کاندیداها بر اساس امتیاز بوست‌شده به‌صورت نزولی (به‌صورت immutable)
+ * مرتب‌سازی کاندیداها بر اساس ضریب زمانی نزولی و سپس امتیاز بوست‌شده به‌صورت نزولی (اکید و قطعی - قانون ۵)
  */
 export function sortByBoostedScore(boosted: BoostedCandidate[]): BoostedCandidate[] {
-  return [...boosted].sort((a, b) => b.boostedScore - a.boostedScore);
+  return [...boosted].sort((a, b) => {
+    const multA = a.temporalMultiplier ?? 1;
+    const multB = b.temporalMultiplier ?? 1;
+    if (multB !== multA) {
+      return multB - multA;
+    }
+    return b.boostedScore - a.boostedScore;
+  });
+}
+
+export const PIN_QUOTA = 4;
+
+/**
+ * ارکستراتور تک‌مرجع (قانون ۱ و ۵) جهت تطابق ۱۰۰٪ ترتیب در UI و AI
+ */
+export function buildLiveOrderedList(
+  candidates: any[],
+  options: {
+    events: TemporalEvent[];
+    today?: JalaliDate;
+    targetMetadata?: Map<number, { title: string; categoryValues: string[] }>;
+  }
+): BoostedCandidate[] {
+  const boosted = applyTemporalBoost(candidates, options);
+  return sortByBoostedScore(boosted);
 }
 
